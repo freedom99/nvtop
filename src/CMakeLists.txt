@@ -7,7 +7,8 @@ add_executable (nvtop
   nvtop.c
   interface.c
   get_process_info_linux.c
-  extract_gpuinfo.c)
+  extract_gpuinfo.c
+  nvtop_time.c)
 
 target_include_directories(nvtop PRIVATE
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
