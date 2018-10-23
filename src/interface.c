@@ -73,11 +73,6 @@ struct all_gpu_processes {
   bool is_graphical;
 };
 
-enum window_type {
-  window_type_process,
-  window_type_plot,
-};
-
 static const unsigned int option_window_size = 13;
 struct option_window {
   enum nvtop_option_window_state state;
@@ -88,7 +83,6 @@ struct option_window {
 };
 
 struct process_window {
-  enum window_type type;
   unsigned int size_biggest_name;
   unsigned int size_processes_buffer;
   unsigned int num_processes;
@@ -103,9 +97,9 @@ struct process_window {
 };
 
 struct plot_window {
-  enum window_type type;
-  unsigned num_minutes;
-  size_t num_data;
+  nvtop_time max_data_retain_time;
+  nvtop_time time_between_data_collection;
+  nvtop_time last_time_collected;
   double *data;
   WINDOW *win;
 };
@@ -118,6 +112,7 @@ struct nvtop_interface {
   size_t num_devices;
   struct device_window *devices_win;
   struct process_window process;
+  size_t num_plots;
   struct plot_window *plots;
   bool use_fahrenheit;
   bool center_device_info;
@@ -357,26 +352,59 @@ static unsigned auto_device_num(unsigned cols, unsigned device_size,
 }
 
 /*
- * Interface layout grammar: (D+N)*((P|C+)N)*
+ * Interface layout grammar: (D+N)?((P|C+)N)*
  * where  D = Device column
  *        N = New block
  *        P = Process block
  *        C = Chart block
  */
 
+static bool is_grammar_ok(const char interfaceLayout[]) {
+  size_t pos_in_string = 0;
+  unsigned state = 0;
+  for (char layoutC = interfaceLayout[pos_in_string]; layoutC != '\0';
+       layoutC = interfaceLayout[++pos_in_string]) {
+    switch(layoutC) {
+      case 'D':
+        if (state != 0 && state != 2)
+          return false;
+        state = 2;
+        break;
+      case 'P':
+        if (state != 2 && state != 1)
+          return false;
+        state = 3;
+        break;
+      case 'C':
+        if (state != 0 && state != 1 && state != 4)
+          return false;
+        state = 4;
+        break;
+      case 'N':
+        if (state != 2 && state != 3 && state != 4)
+          return false;
+        state = 1;
+        break;
+    }
+  }
+  return state == 0 || state == 1;
+}
+
 static void compute_sizes_from_layout(const struct nvtop_interface *interface,
                                       struct window_position *device_positions,
                                       struct window_position *process_position,
                                       struct window_position **plot_position,
+                                      size_t *num_plots,
                                       const char interfaceLayout[]) {
 
   (void) plot_position;
   // Vertical layout
+  if (interfaceLayout == NULL || !is_grammar_ok(interfaceLayout)) {
+    interfaceLayout = "DNCNPN";
+  }
 
-  char on_top = '\0';
   unsigned num_device_columns = 0;
-  unsigned num_separators = 0;
-  unsigned num_plot_blocks = 0;
+  unsigned num_separators = 1;
   unsigned num_plot_windows = 0;
   size_t pos_in_string = 0;
   bool previous_was_new_line = true;
@@ -384,6 +412,7 @@ static void compute_sizes_from_layout(const struct nvtop_interface *interface,
        layoutC = interfaceLayout[++pos_in_string]) {
     switch(layoutC) {
       case 'D':
+        num_separators--;
         num_device_columns++;
         break;
       case 'N':
@@ -391,27 +420,23 @@ static void compute_sizes_from_layout(const struct nvtop_interface *interface,
         break;
       case 'P':
         if (previous_was_new_line) {
-          if(on_top != 'P')
-            num_separators++;
+          num_separators++;
           previous_was_new_line = false;
         }
-        on_top = 'P';
         break;
       case 'C':
         if (previous_was_new_line) {
-          if(on_top != 'C') {
-            num_separators++;
-            num_plot_blocks++;
-          }
+          num_separators++;
           previous_was_new_line = false;
         }
         num_plot_windows++;
-        on_top = 'C';
         break;
       default:
         break;
     }
   }
+  if (num_separators == 0)
+    num_separators = 1;
 
   unsigned rows, cols;
   getmaxyx(stdscr, rows, cols);
@@ -462,12 +487,59 @@ static void compute_sizes_from_layout(const struct nvtop_interface *interface,
   if (current_in_line != 0)
       current_posY += window_height + 1;
 
-  // After devices current_posY is good
+  unsigned
+      sizeBoxY = rows > current_posY + num_separators
+                     ? (rows - current_posY - num_separators) / num_separators
+                     : 0;
   current_posX = 0;
-  process_position->posX = current_posX;
-  process_position->posY = current_posY;
-  process_position->sizeX = cols;
-  process_position->sizeY = rows - 1 > current_posY ? rows - current_posY - 1 : 0;
+
+  unsigned current_plot_id = 0;
+  *plot_position = malloc(num_plot_windows * sizeof(**plot_position));
+  *num_plots = num_plot_windows;
+  pos_in_string = 0;
+  for (char layoutC = interfaceLayout[pos_in_string]; layoutC != '\0';
+       layoutC = interfaceLayout[++pos_in_string]) {
+    switch(layoutC) {
+      case 'D':
+        break;
+      case 'N':
+        current_posX = 0;
+        break;
+      case 'P':
+        {
+          process_position->posX = current_posX;
+          process_position->posY = current_posY;
+          process_position->sizeX = cols;
+          process_position->sizeY = sizeBoxY;
+          current_posY += sizeBoxY + 1;
+          current_posX = 0;
+        }
+        break;
+      case 'C':
+        {
+          unsigned num_plot_on_line = 0;
+          char currC = interfaceLayout[pos_in_string];
+          while (currC == 'C') {
+            num_plot_on_line++;
+            currC = interfaceLayout[++pos_in_string];
+          }
+          pos_in_string --;
+          unsigned sizePlotX = cols > num_plot_on_line + 1 ? cols - num_plot_on_line - 1 : 0;
+          sizePlotX /= num_plot_on_line;
+          for (unsigned i = 0; i < num_plot_on_line; ++i) {
+            (*plot_position)[current_plot_id].posX = current_posX;
+            (*plot_position)[current_plot_id].posY = current_posY;
+            (*plot_position)[current_plot_id].sizeX = sizePlotX;
+            (*plot_position)[current_plot_id].sizeY = sizeBoxY;
+            current_posX += sizePlotX + 1;
+          }
+          current_posY += sizeBoxY + 1;
+        }
+        break;
+      default:
+        break;
+    }
+  }
 }
 
 static void initialize_all_windows(struct nvtop_interface *dwin) {
@@ -478,8 +550,18 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
 
   struct window_position device_positions[num_devices];
   struct window_position process_position;
+  struct window_position *plot_positions = NULL;
 
-  compute_sizes_from_layout(dwin, device_positions, &process_position, NULL, "");
+  compute_sizes_from_layout(dwin, device_positions, &process_position,
+                            &plot_positions, &dwin->num_plots, NULL);
+  dwin->plots = malloc(dwin->num_plots * sizeof(*dwin->plots));
+  for (size_t i = 0; i < dwin->num_plots; ++i) {
+    dwin->plots[i].win = newwin(plot_positions[i].sizeY, plot_positions[i].sizeX,
+                                plot_positions[i].posY, plot_positions[i].posX);
+    dwin->plots[i].data =
+        calloc(plot_positions[i].sizeX, sizeof(*dwin->plots[i].data));
+  }
+  /*alloc_plot_window(dwin);*/
 
   for (unsigned int i = 0; i < num_devices; ++i) {
     alloc_device_window(i, device_positions[i].posY,
@@ -494,7 +576,7 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
 
   dwin->process.option_window.option_selection_window =
     newwin(1, cols, rows-1, 0);
-  /*alloc_plot_window(dwin, dwin->process.option_window.state != nvtop_option_state_hidden);*/
+  free(plot_positions);
 }
 
 static void delete_all_windows(
@@ -508,6 +590,11 @@ static void delete_all_windows(
   dwin->process.process_with_option_win = NULL;
   delwin(dwin->process.option_window.option_selection_window);
   delwin(dwin->process.option_window.option_win);
+  for (size_t i = 0; i < dwin->num_plots; ++i) {
+    delwin(dwin->plots[i].win);
+    free(dwin->plots[i].data);
+  }
+  free(dwin->plots);
 }
 
 void show_gpu_infos_ascii(
