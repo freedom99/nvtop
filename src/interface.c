@@ -21,6 +21,7 @@
 
 #include "nvtop/interface.h"
 #include "nvtop/nvtop_time.h"
+#include "nvtop/plot.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,7 @@ struct plot_window {
   nvtop_time max_data_retain_time;
   nvtop_time time_between_data_collection;
   nvtop_time last_time_collected;
+  size_t num_data;
   double *data;
   WINDOW *win;
 };
@@ -326,10 +328,29 @@ static void alloc_process_with_option(struct nvtop_interface *interface,
   }
 }
 
-/*static void alloc_plot_window(struct nvtop_interface *interface,*/
-                               /*bool alloc_place_for_option) {*/
+static void alloc_plot_window(struct nvtop_interface *interface,
+                              struct window_position *plot_positions) {
+  if (!plot_positions) {
+    interface->plots = NULL;
+    return;
+  }
+  srand(time(NULL));
+  interface->plots = malloc(interface->num_plots * sizeof(*interface->plots));
+  for (size_t i = 0; i < interface->num_plots; ++i) {
+    interface->plots[i].win =
+        newwin(plot_positions[i].sizeY, plot_positions[i].sizeX,
+               plot_positions[i].posY, plot_positions[i].posX);
 
-/*}*/
+    interface->plots[i].data =
+        calloc(plot_positions[i].sizeX, sizeof(*interface->plots[i].data));
+
+    interface->plots[i].num_data = plot_positions[i].sizeX;
+
+    for (size_t j = 0; j < interface->plots[i].num_data; ++j) {
+      interface->plots[i].data[j] = 1 + random() / (double)RAND_MAX * 14.;
+    }
+  }
+}
 
 static unsigned device_length(void) {
   return max(sizeof_device_field[device_name] +
@@ -554,14 +575,8 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
 
   compute_sizes_from_layout(dwin, device_positions, &process_position,
                             &plot_positions, &dwin->num_plots, NULL);
-  dwin->plots = malloc(dwin->num_plots * sizeof(*dwin->plots));
-  for (size_t i = 0; i < dwin->num_plots; ++i) {
-    dwin->plots[i].win = newwin(plot_positions[i].sizeY, plot_positions[i].sizeX,
-                                plot_positions[i].posY, plot_positions[i].posX);
-    dwin->plots[i].data =
-        calloc(plot_positions[i].sizeX, sizeof(*dwin->plots[i].data));
-  }
-  /*alloc_plot_window(dwin);*/
+  alloc_plot_window(dwin, plot_positions);
+  free(plot_positions);
 
   for (unsigned int i = 0; i < num_devices; ++i) {
     alloc_device_window(i, device_positions[i].posY,
@@ -576,7 +591,6 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
 
   dwin->process.option_window.option_selection_window =
     newwin(1, cols, rows-1, 0);
-  free(plot_positions);
 }
 
 static void delete_all_windows(
@@ -1612,6 +1626,9 @@ void draw_gpu_info_ncurses(
   if (interface->process.option_window.state != nvtop_option_state_hidden)
     draw_options(interface);
   draw_option_selection(interface);
+  nvtop_line_plot(interface->plots[0].win, interface->plots[0].num_data,
+                  interface->plots[0].data, 1., 15.);
+  wnoutrefresh(interface->plots[0].win);
   doupdate();
   refresh();
 
